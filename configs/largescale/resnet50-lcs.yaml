@@ -1,0 +1,33 @@
+# config to get 90.23% sparse ResNet50 on ImageNet. Modify this file to get other sparse models.
+# Architecture
+arch: ResNet50
+
+# ===== Dataset ===== #
+data: /home/pp/ZXX/dataset/
+set: ImageNet
+name: LCS_90
+
+# ===== Learning Rate Policy ======== #
+optimizer: sgd
+lr: 0.256
+lr_policy: cosine_lr
+warmup_length: 5
+
+# ===== Network training config ===== #
+epochs: 100
+weight_decay: 0.000030517578125
+momentum: 0.875
+batch_size: 256
+label_smoothing: 0.1
+
+# ===== Sparsity =========== #
+conv_type: LCSConv
+bn_type: LearnedBatchNorm
+init: kaiming_normal
+mode: fan_in
+nonlinearity: relu
+beta: 0.1
+
+# ===== Hardware setup ===== #
+workers: 20
+gpu: 0
