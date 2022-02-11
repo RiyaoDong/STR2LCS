@@ -243,12 +243,11 @@ def parse_arguments():
     parser.add_argument(
         "--ignore-pretrained-weights", action="store_true", help="ignore the weights of a pretrained model."
     )
-    #LCS
-    parser.add_argument('--lmbda', type=float, default=0.1, help='lambda for sparsity (default: 0.1)')
-    parser.add_argument('--alpha1', type=float, default=0.5, help='(default: 1e-8)')
-    parser.add_argument('--alpha2', type=float, default=0.5, help='(default: 1e-8)')
-    parser.add_argument('--tp_lr', default=0.01, type=float, help='initial learning rate')
-    parser.add_argument('--revalue', type=float, default=0.01, help='initial value for mask parameters')
+
+    #CS
+    parser.add_argument('--lmbda', type=float, default=1e-8, help='(default: 1e-8)')
+    parser.add_argument('--final-temp', type=float, default=200, help='(default: 200)')
+    parser.add_argument('--mask-initial-value', type=float, default=0.0, help='initial value for mask parameters')
     parser.add_argument('--rewind-epoch', type=int, default=10, help='epoch to rewind weights to (default: 10)')
 
     args = parser.parse_args()
