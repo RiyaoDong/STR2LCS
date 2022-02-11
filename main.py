@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.logging import AverageMeter, ProgressMeter
 from utils.net_utils import save_checkpoint, get_lr, LabelSmoothing
 from utils.schedulers import get_policy
-from utils.conv_type import STRConv
+from utils.conv_type import STRConv, CSConv
 from utils.conv_type import sparseFunction
 
 from args import args
@@ -73,10 +73,9 @@ def main_worker(args):
 
     optimizer = get_optimizer(args, model)
     data = get_dataset(args)
-    if args.conv_type == "LCSConv":
+    if args.conv_type == "CSConv":
         lr_policy = [get_policy(args.lr_policy)(optimizer[0], args, args.lr),
                      get_policy(args.lr_policy)(optimizer[1], args, args.lr),
-                     get_policy(args.lr_policy)(optimizer[2], args, args.tp_lr),
         ]
     else:
         lr_policy = [get_policy(args.lr_policy)(optimizer, args, args.lr)]
@@ -112,6 +111,10 @@ def main_worker(args):
     end_epoch = time.time()
     args.start_epoch = args.start_epoch or 0
     acc1 = None
+    
+    iters_per_reset = args.epochs-1
+    temp_increase = args.final_temp**(1./iters_per_reset)
+    temp = 1
 
     # Save the initial state
     #save_checkpoint(
@@ -135,9 +138,8 @@ def main_worker(args):
     for epoch in range(args.start_epoch, args.epochs):
         for lr_policy_act in lr_policy:
             lr_policy_act(epoch, iteration=None)
-        if args.conv_type == "LCSConv":
+        if args.conv_type == "CSConv":
             cur_lr = get_lr(optimizer[0])
-            cur_tp_lr = get_lr(optimizer[2])
         else:
             cur_lr = get_lr(optimizer)
 
@@ -150,15 +152,13 @@ def main_worker(args):
                     curr_prune_rate = m.prune_rate - (m.prune_rate*prune_decay)
                     m.set_curr_prune_rate(curr_prune_rate)
         
-        # LCS experiments
-        if args.conv_type == "LCSConv":
-            if epoch+1 == args.rewind_epoch: model.checkpoint()
-
-            if epoch < 60:
+        # CS experiments
+        if args.conv_type == "CSConv":
+            if epoch > 0:
+                temp *= temp_increase
                 for m in model.mask_modules:
-                    if (torch.abs(m.tp)).item() < args.revalue:
-                        m.tp.data = m.init_tp.clone()
-                        m.mask_weight.data = torch.clamp(m.mask_weight.data, max=m.mask_initial_value)
+                    m.temp = temp
+            if epoch+1 == args.rewind_epoch: model.checkpoint()
 
         # train for one epoch
         start_train = time.time()
@@ -171,7 +171,7 @@ def main_worker(args):
         start_validation = time.time()
         acc1, acc5 = validate(data.val_loader, model, criterion, args, writer, epoch)
         
-        if args.conv_type == "LCSConv":
+        if args.conv_type == "CSConv":
             for m in model.mask_modules:
                 m.ticket = True
             acc1_bin, acc5_bin = validate(data.val_loader, model, criterion, args, writer, epoch, "test_bin")
@@ -184,7 +184,7 @@ def main_worker(args):
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
         best_train_acc1 = max(train_acc1, best_train_acc1)
-        if args.conv_type == "LCSConv":
+        if args.conv_type == "CSConv":
             best_acc1_bin = max(acc1_bin, best_acc1_bin)
 
         save = ((epoch % args.save_every) == 0) and args.save_every > 0
@@ -192,7 +192,7 @@ def main_worker(args):
             if is_best:
                 print(f"==> New best, saving at {ckpt_base_dir / 'model_best.pth'}")
         
-            if args.conv_type == "LCSConv":
+            if args.conv_type == "CSConv":
                 save_checkpoint(
                     {
                     "epoch": epoch + 1,
@@ -202,7 +202,6 @@ def main_worker(args):
                     "best_train_acc1": best_train_acc1,
                     "optimizer_w" : optimizer[0].state_dict(),
                     "optimizer_m" : optimizer[1].state_dict(),
-                    "optimizer_t" : optimizer[2].state_dict(),
                     "curr_acc1": acc1,
                     },
                     is_best,
@@ -247,24 +246,23 @@ def main_worker(args):
                     count += total_params
             total_sparsity = 100 - (100 * sum_sparse / count)
             writer.add_scalar("sparsity/total", total_sparsity, epoch)
-        if args.conv_type == "LCSConv":
+        if args.conv_type == "CSConv":
             count = 0
             sum_sparse = 0.0
             for n, m in model.named_modules():
-                if isinstance(m, LCSConv):
+                if isinstance(m, CSConv):
                     sparsity, total_params = m.getSparsity()
                     writer.add_scalar("sparsity/{}".format(n), sparsity, epoch)
                     sum_sparse += int(((100 - sparsity) / 100) * total_params)
                     count += total_params
             total_sparsity = 100 - (100 * sum_sparse / count)
             writer.add_scalar("sparsity/total", total_sparsity, epoch)
-            writer.add_scalar("test/tp_lr", cur_tp_lr, epoch)
         end_epoch = time.time()
 
 
     # ############################# Rewind training ##########################
-    weight_params = map(lambda a: a[1], filter(lambda p: p[1].requires_grad and 'mask_weight' not in p[0] and 'tp' not in p[0], model.named_parameters()))
-    optimizer = [optim.SGD(weight_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)]
+    weight_params = map(lambda a: a[1], filter(lambda p: p[1].requires_grad and 'mask_weight' not in p[0], model.named_parameters()))
+    optimizer = [torch.optim.SGD(weight_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)]
     for m in model.mask_modules:
         m.ticket = True
     model.rewind_weights()
@@ -311,7 +309,7 @@ def main_worker(args):
             if is_best:
                 print(f"==> New best, saving at {ckpt_base_dir / 'model_best.pth'}")
         
-            if args.conv_type == "LCSConv":
+            if args.conv_type == "CSConv":
                 save_checkpoint(
                     {
                     "epoch": epoch + 1,
@@ -337,11 +335,11 @@ def main_worker(args):
         end_epoch = time.time()
 
         # Storing sparsity
-        if args.conv_type == "LCSConv":
+        if args.conv_type == "CSConv":
             count = 0
             sum_sparse = 0.0
             for n, m in model.named_modules():
-                if isinstance(m, LCSConv):
+                if isinstance(m, CSConv):
                     sparsity, total_params = m.getSparsity()
                     writer.add_scalar("sparsity_rewind/{}".format(n), sparsity, epoch)
                     sum_sparse += int(((100 - sparsity) / 100) * total_params)
@@ -360,10 +358,10 @@ def main_worker(args):
         base_config=args.config,
         name=args.name,
     )
-    if args.conv_type == "LCSConv":
+    if args.conv_type == "CSConv":
         json_data = {}
         for n, m in model.named_modules():
-            if isinstance(m, LCSConv):
+            if isinstance(m, CSConv):
                 sparsity = m.getSparsity()
                 json_data[n] = sparsity[0]
                 sum_sparse += int(((100 - sparsity[0]) / 100) * sparsity[1])
@@ -409,10 +407,9 @@ def resume(args, model, optimizer):
 
         model.load_state_dict(checkpoint["state_dict"])
 
-        if args.conv_type == "LCSConv":
+        if args.conv_type == "CSConv":
             optimizer[0].load_state_dict(checkpoint['optimizer_w'])
             optimizer[1].load_state_dict(checkpoint['optimizer_m'])
-            optimizer[2].load_state_dict(checkpoint['optimizer_t'])
         else:
             optimizer.load_state_dict(checkpoint["optimizer"])
 
@@ -523,14 +520,12 @@ def get_optimizer(args, model):
             pass #print("<DEBUG> no gradient to", n)
 
     if args.optimizer == "sgd":
-        if args.conv_type == "LCSConv":
-            weight_params = map(lambda a: a[1], filter(lambda p: p[1].requires_grad and 'mask_weight' not in p[0] and 'tp' not in p[0], model.named_parameters()))
+        if args.conv_type == "CSConv":
+            weight_params = map(lambda a: a[1], filter(lambda p: p[1].requires_grad and 'mask_weight' not in p[0], model.named_parameters()))
             mask_params = map(lambda a: a[1], filter(lambda p: p[1].requires_grad and 'mask_weight' in p[0], model.named_parameters()))
-            temp_params = map(lambda a: a[1], filter(lambda p: p[1].requires_grad and 'tp' in p[0], model.named_parameters()))
             weight_optim = torch.optim.SGD(weight_params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay) 
             mask_optim = torch.optim.SGD(mask_params, lr=args.lr, momentum=args.momentum)
-            tp_optim = torch.optim.SGD(temp_params, lr=args.tp_lr, momentum=args.momentum, weight_decay=args.weight_decay)
-            optimizer = [weight_optim, mask_optim, tp_optim]
+            optimizer = [weight_optim, mask_optim]
         else:
             parameters = list(model.named_parameters())
             sparse_thresh = [v for n, v in parameters if ("sparseThreshold" in n) and v.requires_grad]
@@ -632,11 +627,9 @@ def write_result_to_csv(**kwargs):
                 "{name}, "
                 "{prune_rate}, "
                 "{curr_acc1:.02f}, "
-                "{curr_acc5:.02f}, "
                 "{best_acc1:.02f}, "
-                "{best_acc5:.02f}, "
-                "{best_train_acc1:.02f}, "
-                "{best_train_acc5:.02f}\n"
+                "{best_acc1_bin:.02f}, "
+                "{best_train_acc1:.02f}\n"
             ).format(now=now, **kwargs)
         )
 
