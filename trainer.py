@@ -44,14 +44,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer):
         # compute output
         output = model(images)
 
-        if args.conv_type == "LCSConv":
+        if args.conv_type == "CSConv":
             masks = [m.mask for m in model.mask_modules]
             entries_sum = sum(m.sum() for m in masks)
-            tps = [torch.abs(m.tp) * m.mask.numel() for m in model.mask_modules]
-            tps_sum = sum(m for m in tps)
-            nums = [m.mask.numel() for m in model.mask_modules]
-            allnums = sum(t for t in nums)
-            loss = args.alpha1 * criterion(output, target.view(-1)) + args.alpha2 * tps_sum / allnums + args.lmbda * entries_sum / allnums
+            loss = criterion(output, target.view(-1)) + args.lmbda * entries_sum
         else:
             loss = criterion(output, target.view(-1))
 
@@ -62,7 +58,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer):
         top5.update(acc5.item(), images.size(0))
 
         # compute gradient and do SGD step
-        if args.conv_type == "LCSConv":
+        if args.conv_type == "CSConv":
             for optim in optimizer: optim.zero_grad()
             loss.backward()
             for optim in optimizer: optim.step()
@@ -100,24 +96,22 @@ def validate(val_loader, model, criterion, args, writer, epoch, prefix="test"):
         for i, (images, target) in tqdm.tqdm(
             enumerate(val_loader), ascii=True, total=len(val_loader)
         ):
-            if args.gpu is not None:
-                images = images.cuda(args.gpu, non_blocking=True)
+            #if args.gpu is not None:
+            #    images = images.cuda(args.gpu, non_blocking=True)
 
-            target = target.cuda(args.gpu, non_blocking=True).long()
+            #target = target.cuda(args.gpu, non_blocking=True).long()
+            images = images.cuda()
+            target = target.cuda().long()
 
             # compute output
             output = model(images)
 
-        if args.conv_type == "LCSConv":
-            masks = [m.mask for m in model.mask_modules]
-            entries_sum = sum(m.sum() for m in masks)
-            tps = [torch.abs(m.tp) * m.mask.numel() for m in model.mask_modules]
-            tps_sum = sum(m for m in tps)
-            nums = [m.mask.numel() for m in model.mask_modules]
-            allnums = sum(t for t in nums)
-            loss = args.alpha1 * criterion(output, target.view(-1)) + args.alpha2 * tps_sum / allnums + args.lmbda * entries_sum / allnums
-        else:
-            loss = criterion(output, target.view(-1))
+            if args.conv_type == "CSConv":
+                masks = [m.mask for m in model.mask_modules]
+                entries_sum = sum(m.sum() for m in masks)
+                loss = criterion(output, target.view(-1)) + args.lmbda * entries_sum
+            else:
+                loss = criterion(output, target.view(-1))
 
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
